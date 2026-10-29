@@ -180,9 +180,16 @@ def validate_chain(leaf: x509.Certificate,
             nxt = next((c for c in pool if c.subject == current.issuer
                         and c is not current), None)
             if nxt is None:
-                raise ChainValidationError(
-                    f"cannot find issuer '{current.issuer.rfc4514_string()}' "
-                    f"for '{cn(current)}' (chain incomplete / untrusted root)")
+                # Distinguish: is the issuer a self-signed root (untrusted) or truly missing?
+                self_signed = (current.issuer == current.subject)
+                if self_signed:
+                    raise ChainValidationError(
+                        f"root CA '{cn(current)}' is self-signed but NOT present "
+                        f"in the trust store — chain is untrusted")
+                else:
+                    raise ChainValidationError(
+                        f"cannot find issuer '{current.issuer.rfc4514_string()}' "
+                        f"for '{cn(current)}' — chain is incomplete")
             pool.remove(nxt)
             path.append(nxt)
             current = nxt
