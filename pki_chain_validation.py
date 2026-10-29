@@ -109,13 +109,17 @@ def build_pki() -> PKI:
 # Chain validation (the core of the exercise)
 # --------------------------------------------------------------------------
 class ChainValidationError(Exception):
-    pass
+    def __init__(self, msg, missing_issuer_of=None):
+        super().__init__(msg)
+        self.missing_issuer_of = missing_issuer_of  # CN of the cert whose issuer was not found
 
 
 @dataclass
 class ValidationResult:
     valid: bool
     log: list = field(default_factory=list)
+    failed_cert: str = None         # CN of the certificate whose check failed
+    missing_issuer_of: str = None   # CN of the cert whose issuer could not be located
 
 
 def verify_signature(child: x509.Certificate, parent: x509.Certificate) -> None:
@@ -166,6 +170,7 @@ def validate_chain(leaf: x509.Certificate,
     res = ValidationResult(valid=False)
     log = res.log.append
     cn = lambda c: c.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
+    culprit = None
 
     try:
         # ---- 1. Path building: walk issuer names until we hit a trust anchor
@@ -180,16 +185,16 @@ def validate_chain(leaf: x509.Certificate,
             nxt = next((c for c in pool if c.subject == current.issuer
                         and c is not current), None)
             if nxt is None:
-                # Distinguish: is the issuer a self-signed root (untrusted) or truly missing?
-                self_signed = (current.issuer == current.subject)
-                if self_signed:
+                # Distinguish: is `current` a self-signed root (untrusted) or is its issuer missing?
+                if current.issuer == current.subject:
+                    culprit = cn(current)
                     raise ChainValidationError(
                         f"root CA '{cn(current)}' is self-signed but NOT present "
-                        f"in the trust store — chain is untrusted")
-                else:
-                    raise ChainValidationError(
-                        f"cannot find issuer '{current.issuer.rfc4514_string()}' "
-                        f"for '{cn(current)}' — chain is incomplete")
+                        f"in the trust store - chain is untrusted")
+                raise ChainValidationError(
+                    f"cannot find issuer '{current.issuer.rfc4514_string()}' "
+                    f"for '{cn(current)}' - chain is incomplete or its root is not trusted",
+                    missing_issuer_of=cn(current))
             pool.remove(nxt)
             path.append(nxt)
             current = nxt
@@ -203,6 +208,7 @@ def validate_chain(leaf: x509.Certificate,
             child, parent = path[i], path[i + 1]
             tag = f"[{cn(child)} <- {cn(parent)}]"
 
+            culprit = cn(child)
             if child.issuer != parent.subject:
                 raise ChainValidationError(f"{tag} issuer/subject name mismatch")
             log(f"{tag} issuer name matches parent subject")
@@ -213,6 +219,7 @@ def validate_chain(leaf: x509.Certificate,
             check_validity(child, at)
             log(f"{tag} child within validity period")
 
+            culprit = cn(parent)
             bc = check_is_ca(parent)
             log(f"{tag} parent is a CA (CA=TRUE, keyCertSign)")
 
@@ -226,6 +233,7 @@ def validate_chain(leaf: x509.Certificate,
 
         # ---- 3. Validate the trust anchor itself
         root = path[-1]
+        culprit = cn(root)
         verify_signature(root, root)
         log(f"[{cn(root)}] self-signature VERIFIED")
         check_validity(root, at)
@@ -237,6 +245,8 @@ def validate_chain(leaf: x509.Certificate,
         res.valid = True
         log("RESULT: chain is VALID")
     except ChainValidationError as e:
+        res.failed_cert = culprit
+        res.missing_issuer_of = e.missing_issuer_of
         log(f"FAILURE: {e}")
         log("RESULT: chain is INVALID")
     return res

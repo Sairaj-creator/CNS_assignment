@@ -67,8 +67,6 @@ if st.session_state.pki is not None:
             leaf_cert = tamper(pki.leaf_cert)
         elif scenario.startswith("3"):
             evil_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-            evil_name = make_name("Evil Root CA")
-            evil_root = issue_cert(evil_name, evil_key, evil_name, evil_key, is_ca=True, path_length=1)
             fake_inter = issue_cert(pki.inter_cert.subject, pki.inter_key, pki.root_cert.subject, evil_key, is_ca=True, path_length=0)
             intermediates = [fake_inter]
         elif scenario.startswith("4"):
@@ -90,67 +88,39 @@ if st.session_state.pki is not None:
         else:
             st.error("Result: Chain is INVALID")
 
-        # ── Dynamic graph coloring based on ACTUAL validation log ──────────
-        # Parse the log to find WHICH link failed, then color that node red.
-        # Default: all green (valid chain or not yet failed at that node)
-        root_color  = "green"
-        inter_color = "green"
-        user_color  = "green"
-        sub_color   = "green"
-
-        failure_line = next((l for l in result.log if l.startswith("FAILURE:")), None)
-
-        if not result.valid and failure_line:
-            msg = failure_line.lower()
-
-            # Test 4 / root untrusted: "root ca ... not present in trust store"
-            if "trust store" in msg or "not trusted" in msg or "untrusted" in msg:
-                root_color = "red"
-
-            # Test 6 / chain incomplete at leaf level (no intermediate found)
-            elif "chain is incomplete" in msg and scenario.startswith("6"):
-                inter_color = "red"   # show the missing link in red
-
-            # Test 3 / rogue intermediate: failure is at [fake_inter <- Root]
-            # The FAILURE tag contains the intermediate CA name
-            elif "demo intermediate ca" in msg and "demo root ca" in msg:
-                inter_color = "red"
-
-            # Test 7 / CA abuse: leaf cert used as CA → failure at leaf-as-parent check
-            elif "ca=false" in msg or "key_cert_sign" in msg or "basicconstraints" in msg:
-                user_color = "red"
-                sub_color  = "red"
-
-            # Test 2 / tampered leaf: signature fails on [alice <- intermediate]
-            elif "alice" in msg or ("signature" in msg and "end" in msg):
-                user_color = "red"
-
-            # Test 5 / expiry: validity check fails on leaf
-            elif "expired" in msg or "not yet valid" in msg:
-                user_color = "red"
-
-            # Fallback: parse the tag [child <- parent] from the FAILURE log line
-            # to identify which node to color red
+        # ── Graph colouring from the validator's structured result ─────────
+        node_of = {
+            "Demo Root CA": "root",
+            "Demo Intermediate CA": "inter",
+            "alice@example.com": "user",
+            "sub.example.com": "sub",
+        }
+        colors = {"root": "green", "inter": "green", "user": "green", "sub": "green"}
+        if not result.valid:
+            if result.missing_issuer_of:
+                # The failing node is the *issuer* of the cert that has no parent.
+                above = {"user": "inter", "inter": "root"}
+                bad = above.get(node_of.get(result.missing_issuer_of))
             else:
-                for log_line in result.log:
-                    if log_line.startswith("FAILURE:"):
-                        if "alice" in log_line.lower() or "example.com" in log_line.lower():
-                            user_color = "red"
-                        elif "intermediate" in log_line.lower():
-                            inter_color = "red"
-                        elif "root" in log_line.lower():
-                            root_color = "red"
-                        break
+                bad = node_of.get(result.failed_cert)
+            if bad:
+                colors[bad] = "red"
+            if scenario.startswith("7"):
+                colors["sub"] = "red"   # certificate issued by a non-CA
+        root_color, inter_color = colors["root"], colors["inter"]
+        user_color, sub_color = colors["user"], colors["sub"]
 
         # ── Build the graph ─────────────────────────────────────────────────
         if scenario.startswith("6"):
-            # Missing intermediate → show dashed link
+            # Missing intermediate → show a dashed placeholder node
             graph = f'''
                 digraph G {{
                     node [shape=box, style=filled, fontname="Helvetica"];
                     Root  [label="Root CA",          fillcolor="{root_color}"];
+                    Inter [label="Intermediate CA\\n(missing)", fillcolor="{inter_color}", style="filled,dashed"];
                     User  [label="End-user (Alice)", fillcolor="{user_color}"];
-                    Root -> User [style=dashed, label="Missing Intermediate"];
+                    Root -> Inter [style=dashed];
+                    Inter -> User [style=dashed];
                 }}
             '''
         elif scenario.startswith("7"):
