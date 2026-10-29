@@ -89,48 +89,96 @@ if st.session_state.pki is not None:
             st.success("Result: Chain is VALID")
         else:
             st.error("Result: Chain is INVALID")
-            
-        # Draw a simple graph indicating pass/fail at the nodes based on the scenario
-        # This is purely visual for the demo
-        root_color = "red" if scenario.startswith("4") else "green"
-        inter_color = "red" if scenario.startswith("3") or scenario.startswith("6") else "green"
-        user_color = "red" if scenario.startswith("2") or scenario.startswith("5") or scenario.startswith("7") else "green"
 
+        # ── Dynamic graph coloring based on ACTUAL validation log ──────────
+        # Parse the log to find WHICH link failed, then color that node red.
+        # Default: all green (valid chain or not yet failed at that node)
+        root_color  = "green"
+        inter_color = "green"
+        user_color  = "green"
+        sub_color   = "green"
+
+        failure_line = next((l for l in result.log if l.startswith("FAILURE:")), None)
+
+        if not result.valid and failure_line:
+            msg = failure_line.lower()
+
+            # Test 4 / root untrusted: "root ca ... not present in trust store"
+            if "trust store" in msg or "not trusted" in msg or "untrusted" in msg:
+                root_color = "red"
+
+            # Test 6 / chain incomplete at leaf level (no intermediate found)
+            elif "chain is incomplete" in msg and scenario.startswith("6"):
+                inter_color = "red"   # show the missing link in red
+
+            # Test 3 / rogue intermediate: failure is at [fake_inter <- Root]
+            # The FAILURE tag contains the intermediate CA name
+            elif "demo intermediate ca" in msg and "demo root ca" in msg:
+                inter_color = "red"
+
+            # Test 7 / CA abuse: leaf cert used as CA → failure at leaf-as-parent check
+            elif "ca=false" in msg or "key_cert_sign" in msg or "basicconstraints" in msg:
+                user_color = "red"
+                sub_color  = "red"
+
+            # Test 2 / tampered leaf: signature fails on [alice <- intermediate]
+            elif "alice" in msg or ("signature" in msg and "end" in msg):
+                user_color = "red"
+
+            # Test 5 / expiry: validity check fails on leaf
+            elif "expired" in msg or "not yet valid" in msg:
+                user_color = "red"
+
+            # Fallback: parse the tag [child <- parent] from the FAILURE log line
+            # to identify which node to color red
+            else:
+                for log_line in result.log:
+                    if log_line.startswith("FAILURE:"):
+                        if "alice" in log_line.lower() or "example.com" in log_line.lower():
+                            user_color = "red"
+                        elif "intermediate" in log_line.lower():
+                            inter_color = "red"
+                        elif "root" in log_line.lower():
+                            root_color = "red"
+                        break
+
+        # ── Build the graph ─────────────────────────────────────────────────
         if scenario.startswith("6"):
+            # Missing intermediate → show dashed link
             graph = f'''
                 digraph G {{
                     node [shape=box, style=filled, fontname="Helvetica"];
-                    Root [label="Root CA", fillcolor="{root_color}"];
-                    User [label="End-user (Alice)", fillcolor="{user_color}"];
-                    Root -> User [style=dashed, label="Missing link"];
+                    Root  [label="Root CA",          fillcolor="{root_color}"];
+                    User  [label="End-user (Alice)", fillcolor="{user_color}"];
+                    Root -> User [style=dashed, label="Missing Intermediate"];
                 }}
             '''
         elif scenario.startswith("7"):
+            # End-user cert abused as CA — show 4-node chain
             graph = f'''
                 digraph G {{
                     node [shape=box, style=filled, fontname="Helvetica"];
-                    Root [label="Root CA", fillcolor="{root_color}"];
-                    Inter [label="Intermediate CA", fillcolor="{inter_color}"];
-                    User [label="End-user (Alice)\\nCA=FALSE", fillcolor="{user_color}"];
-                    Sub [label="Sub (Abused)", fillcolor="red"];
+                    Root  [label="Root CA",                 fillcolor="{root_color}"];
+                    Inter [label="Intermediate CA",         fillcolor="{inter_color}"];
+                    User  [label="End-user (Alice)\\nCA=FALSE", fillcolor="{user_color}"];
+                    Sub   [label="sub.example.com\\n(Abused)", fillcolor="{sub_color}"];
                     Root -> Inter;
                     Inter -> User;
-                    User -> Sub;
+                    User -> Sub [style=dashed, label="Illegitimate"];
                 }}
             '''
         else:
             graph = f'''
                 digraph G {{
                     node [shape=box, style=filled, fontname="Helvetica"];
-                    Root [label="Root CA", fillcolor="{root_color}"];
-                    Inter [label="Intermediate CA", fillcolor="{inter_color}"];
-                    User [label="End-user (Alice)", fillcolor="{user_color}"];
-                    
+                    Root  [label="Root CA",          fillcolor="{root_color}"];
+                    Inter [label="Intermediate CA",  fillcolor="{inter_color}"];
+                    User  [label="End-user (Alice)", fillcolor="{user_color}"];
                     Root -> Inter;
                     Inter -> User;
                 }}
             '''
-            
+
         st.graphviz_chart(graph)
 
         st.markdown("### Validation Step Log")
